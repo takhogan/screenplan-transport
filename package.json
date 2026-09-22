@@ -1,0 +1,22 @@
+{
+  "name": "@screenplan/transport",
+  "version": "0.1.0",
+  "description": "ScreenPlan relay transport: the fixed-width routing prefix codec, the client/host wire protocol types, and the platform-agnostic client connection state machine shared by script-studio and Script-Engine-Controller.",
+  "license": "ISC",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^22.14.0"
+  }
+}
