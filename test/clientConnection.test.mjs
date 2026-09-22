@@ -277,3 +277,26 @@ test('close rejects everything in flight and shuts the peer connection down', as
     await assert.rejects(pending, /closed before the response arrived/);
     assert.equal(peerConnections[0].closed, true);
 });
+
+test('a host that missed one handshake is retried rather than left stuck', async () => {
+    const { transport, host, socket } = harness({ connectTimeoutMs: 120 });
+    await transport.start();
+
+    // First attempt: the host never acknowledges.
+    host.autoAcceptInitialization = false;
+    await assert.rejects(transport.doRequest(HOST_SERIAL, jsonRequest(), true), /uninitialized/);
+    assert.equal(transport.getHostState(HOST_SERIAL).websocket, 'pending');
+
+    // Second attempt, host back: the handshake is sent again and the request lands.
+    host.autoAcceptInitialization = true;
+    const pending = transport.doRequest(HOST_SERIAL, jsonRequest(), true);
+    const frame = await requestFrame(socket, '/api/list-scripts');
+    host.respond(frame.requestId, { recovered: true });
+    assert.deepEqual(await pending, { recovered: true });
+
+    const handshakes = socket
+        .decodedSent()
+        .filter((f) => f.envelope.initialization && f.envelope.initialization.begin);
+    assert.equal(handshakes.length, 2, 'the handshake was re-sent, not skipped');
+    transport.close();
+});

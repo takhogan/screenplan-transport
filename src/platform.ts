@@ -9,7 +9,13 @@
  * the whole adapter surface — plus auth, which lives inside `openWebSocket`.
  *
  * The interfaces are structural on purpose: the real `WebSocket` and
- * `RTCPeerConnection` from either environment satisfy them as-is.
+ * `RTCPeerConnection` from either environment satisfy them as-is. That is also
+ * why the event-handler *properties* take `any` — TypeScript checks property
+ * parameters contravariantly, so declaring `onmessage` as taking `{ data }`
+ * would reject the browser's own `WebSocket` and force a cast at every call
+ * site. The handlers in `clientConnection.ts` annotate their own parameters, so
+ * the `any` stops at this boundary. Methods stay precisely typed: method
+ * parameters are bivariant and satisfy both platforms as written.
  */
 
 /** `WebSocket.OPEN` in both the browser and `ws`. */
@@ -19,10 +25,11 @@ export interface WebSocketLike {
     readyState: number;
     send(data: string): void;
     close(code?: number, reason?: string): void;
-    onopen: ((event: unknown) => void) | null;
-    onclose: ((event: unknown) => void) | null;
-    onerror: ((event: unknown) => void) | null;
-    onmessage: ((event: { data: unknown }) => void) | null;
+    // `any` on the event parameters is deliberate: see the note above.
+    onopen: ((event: any) => void) | null;
+    onclose: ((event: any) => void) | null;
+    onerror: ((event: any) => void) | null;
+    onmessage: ((event: any) => void) | null;
 }
 
 export interface RTCDataChannelLike {
@@ -31,10 +38,10 @@ export interface RTCDataChannelLike {
     label: string;
     send(data: string): void;
     close(): void;
-    onopen: ((event: unknown) => void) | null;
-    onclose: ((event: unknown) => void) | null;
-    onerror: ((event: unknown) => void) | null;
-    onmessage: ((event: { data: unknown }) => void) | null;
+    onopen: ((event: any) => void) | null;
+    onclose: ((event: any) => void) | null;
+    onerror: ((event: any) => void) | null;
+    onmessage: ((event: any) => void) | null;
 }
 
 export interface RTCPeerConnectionLike {
@@ -47,9 +54,9 @@ export interface RTCPeerConnectionLike {
     setRemoteDescription(description: unknown): Promise<void>;
     addIceCandidate(candidate: unknown): Promise<void>;
     close(): void;
-    onicecandidate: ((event: { candidate: unknown }) => void) | null;
-    ondatachannel: ((event: { channel: RTCDataChannelLike }) => void) | null;
-    oniceconnectionstatechange: ((event: unknown) => void) | null;
+    onicecandidate: ((event: any) => void) | null;
+    ondatachannel: ((event: any) => void) | null;
+    oniceconnectionstatechange: ((event: any) => void) | null;
 }
 
 export interface TransportLogger {

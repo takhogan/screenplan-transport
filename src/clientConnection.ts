@@ -340,6 +340,12 @@ export class ClientTransport {
 
         const ready = await this.waitFor(() => this.websocketReady(connection));
         if (!ready) {
+            // Back to 'pending' so the next attempt re-sends the handshake.
+            // Without this a host that missed one initialization stays stuck in
+            // 'initializing', which the branch above skips, and every later
+            // request waits out the connect timeout for a handshake that will
+            // never be sent again.
+            connection.websocketState = 'pending';
             return null;
         }
         if (connection.webRTCState === 'pending') {
@@ -449,7 +455,7 @@ export class ClientTransport {
         }
         this.ws = ws;
 
-        ws.onerror = (error) => {
+        ws.onerror = (error: unknown) => {
             this.logger.error('ClientTransport: relay websocket error', error);
         };
 
@@ -470,7 +476,7 @@ export class ClientTransport {
             this.scheduleReconnect();
         };
 
-        ws.onmessage = (event) => {
+        ws.onmessage = (event: { data: unknown }) => {
             void this.handleDeviceMessage(event.data);
         };
 
@@ -730,7 +736,7 @@ export class ClientTransport {
             }
         }, this.webRTCNegotiationTimeoutMs);
 
-        pc.onicecandidate = (event) => {
+        pc.onicecandidate = (event: { candidate: unknown }) => {
             if (event.candidate) {
                 this.sendSetup(connection, { ice: event.candidate });
             }
@@ -751,7 +757,7 @@ export class ClientTransport {
         // The host opens a second channel back to us the moment it answers; its
         // 'open' is what proves the path works in both directions, so that is
         // where webRTCState becomes 'completed'.
-        pc.ondatachannel = (event) => {
+        pc.ondatachannel = (event: { channel: RTCDataChannelLike }) => {
             const returnChannel = event.channel;
             connection.returnChannel = returnChannel;
             returnChannel.onopen = () => {
@@ -769,13 +775,13 @@ export class ClientTransport {
                     `ClientTransport: WebRTC return channel closed for ${connection.hostSerial}-${connection.connectionId}`
                 );
             };
-            returnChannel.onerror = (error) => {
+            returnChannel.onerror = (error: unknown) => {
                 this.logger.error(
                     `ClientTransport: WebRTC return channel error for ${connection.hostSerial}`,
                     error
                 );
             };
-            returnChannel.onmessage = (messageEvent) => {
+            returnChannel.onmessage = (messageEvent: { data: unknown }) => {
                 void this.handleDeviceMessage(messageEvent.data);
             };
         };
