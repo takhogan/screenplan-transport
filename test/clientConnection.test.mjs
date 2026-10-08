@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClientTransport, padHostSerial } from '../dist/index.js';
+import { ClientTransport, TransportRequestError, padHostSerial } from '../dist/index.js';
 import {
     FakeHost,
     FakePeerConnection,
@@ -166,8 +166,8 @@ test("a host's error body rejects the request", async () => {
     const frame = await requestFrame(socket, '/api/nope');
 
     host.respond(frame.requestId, { message: '404 Not Found' });
-    // 'json' resolves with whatever data the host sent; the error shape is only
-    // special-cased for the chunked types, which cannot carry it any other way.
+    // Without the `error` flag a bare `{ message }` is indistinguishable from a
+    // successful 'json' body, so it still resolves.
     assert.deepEqual(await pending, { message: '404 Not Found' });
 
     const chunked = transport.doRequest(
@@ -178,6 +178,60 @@ test("a host's error body rejects the request", async () => {
     const chunkedFrame = await requestFrame(socket, '/api/serve');
     host.respond(chunkedFrame.requestId, { message: 'boom' });
     await assert.rejects(chunked, (error) => error === 'boom' || error.message === 'boom');
+    transport.close();
+});
+
+test('a flagged error reply rejects with the message and status', async () => {
+    const { transport, host, socket } = harness();
+    await transport.start();
+    const pending = transport.doRequest(HOST_SERIAL, jsonRequest('/api/request-download'), true);
+    const frame = await requestFrame(socket, '/api/request-download');
+
+    host.respond(
+        frame.requestId,
+        { message: 'Error downloading script: read ECONNRESET' },
+        undefined,
+        { error: true, status: 500 }
+    );
+    await assert.rejects(pending, (error) => {
+        assert.ok(error instanceof TransportRequestError);
+        assert.equal(error.message, 'Error downloading script: read ECONNRESET');
+        assert.equal(error.status, 500);
+        assert.equal(error.path, '/api/request-download');
+        assert.equal(error.hostSerial, HOST_SERIAL);
+        return true;
+    });
+
+    const chunked = transport.doRequest(
+        HOST_SERIAL,
+        { requestId: null, method: 'GET', requestType: 'chunks', path: '/api/serve', payload: {} },
+        true
+    );
+    const chunkedFrame = await requestFrame(socket, '/api/serve');
+    host.respond(chunkedFrame.requestId, { message: 'boom' }, undefined, { error: true, status: 500 });
+    await assert.rejects(chunked, (error) => error instanceof TransportRequestError && error.status === 500);
+    transport.close();
+});
+
+test("an older host's double-wrapped 'json' error rejects", async () => {
+    const { transport, host, socket } = harness();
+    await transport.start();
+    const pending = transport.doRequest(HOST_SERIAL, jsonRequest('/api/request-download'), true);
+    const frame = await requestFrame(socket, '/api/request-download');
+
+    host.respond(frame.requestId, { message: { message: 'Error downloading script: socket hang up' } });
+    await assert.rejects(pending, (error) => {
+        assert.ok(error instanceof TransportRequestError);
+        assert.equal(error.message, 'Error downloading script: socket hang up');
+        assert.equal(error.status, undefined);
+        return true;
+    });
+
+    // A successful body that happens to carry a string `message` still resolves.
+    const ok = transport.doRequest(HOST_SERIAL, jsonRequest('/api/reset-device'), true);
+    const okFrame = await requestFrame(socket, '/api/reset-device');
+    host.respond(okFrame.requestId, { message: 'reset device 1' });
+    assert.deepEqual(await ok, { message: 'reset device 1' });
     transport.close();
 });
 

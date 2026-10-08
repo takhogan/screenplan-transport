@@ -7,8 +7,10 @@ import {
 } from './routing';
 import {
     isErrorBody,
+    isLegacyJsonErrorBody,
     TransportEnvelope,
     TransportRequest,
+    TransportRequestError,
     TransportResponse
 } from './protocol';
 import {
@@ -176,7 +178,9 @@ export class ClientTransport {
     /**
      * Tunnels one request to `hostSerial` and resolves with the host's payload:
      * the `data` field for 'json' and 'html', the assembled part array for
-     * 'chunks' and 'chunkstream'.
+     * 'chunks' and 'chunkstream'. A failure the host reports rejects with a
+     * `TransportRequestError` (older hosts' 'chunks' and 'chunkstream' errors
+     * still reject with the bare message).
      *
      * With `awaitCreation` false and no connection yet, this rejects rather than
      * waiting — the polling callers in script-studio rely on that to skip a tick
@@ -631,6 +635,14 @@ export class ClientTransport {
         }
 
         const data = response.data;
+        if (response.error === true) {
+            this.settle(requestId, pending, () =>
+                pending.reject(
+                    new TransportRequestError(pending.hostSerial, pending.request.path, data, response.status)
+                )
+            );
+            return;
+        }
         switch (pending.request.requestType) {
             case 'chunks': {
                 if (isErrorBody(data)) {
@@ -677,6 +689,12 @@ export class ClientTransport {
                 return;
             }
             default: {
+                if (isLegacyJsonErrorBody(data)) {
+                    this.settle(requestId, pending, () =>
+                        pending.reject(new TransportRequestError(pending.hostSerial, pending.request.path, data))
+                    );
+                    return;
+                }
                 this.settle(requestId, pending, () => pending.resolve(data));
             }
         }

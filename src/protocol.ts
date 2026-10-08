@@ -74,6 +74,14 @@ export interface TransportEnvelope extends EnvelopeIdentity {
 export interface TransportResponse {
     requestId: string;
     data?: unknown;
+    /**
+     * Set by a host when the request failed; `data` is then a
+     * `TransportErrorBody` whose `message` is a string. Hosts that predate the
+     * flag omit it — see `isLegacyJsonErrorBody` for how their failures look.
+     */
+    error?: boolean;
+    /** The HTTP status the host's local API answered with, when there was one. */
+    status?: number;
 }
 
 /** `requestType: 'chunks'` — a length announcement followed by indexed parts. */
@@ -107,4 +115,65 @@ export interface TransportErrorBody {
 
 export function isErrorBody(data: unknown): data is TransportErrorBody {
     return !!data && typeof data === 'object' && 'message' in data;
+}
+
+/**
+ * A 'json' failure from a host that predates `TransportResponse.error`. Those
+ * hosts wrap the API's error body a second time, `{ message: { message } }`,
+ * so the inner value is an object. A bare `{ message }` cannot be told apart
+ * from a successful reply (`{ message: 'reset device ...' }` is one), so only
+ * the nested shape counts.
+ */
+export function isLegacyJsonErrorBody(data: unknown): data is TransportErrorBody {
+    if (!isErrorBody(data) || Object.keys(data).length !== 1) {
+        return false;
+    }
+    const inner = data.message;
+    return !!inner && typeof inner === 'object' && !Array.isArray(inner);
+}
+
+/** Pulls a readable string out of whatever a host put in `message`. */
+export function describeErrorMessage(message: unknown): string {
+    if (typeof message === 'string') {
+        return message;
+    }
+    if (message && typeof message === 'object') {
+        const inner = (message as { message?: unknown }).message;
+        if (typeof inner === 'string' && inner) {
+            return inner;
+        }
+        if (inner !== undefined && inner !== message) {
+            return describeErrorMessage(inner);
+        }
+        const code = (message as { code?: unknown }).code;
+        if (typeof code === 'string' && code) {
+            return code;
+        }
+    }
+    try {
+        return JSON.stringify(message) ?? String(message);
+    } catch {
+        return String(message);
+    }
+}
+
+/**
+ * What a request rejects with when the host reports a failure. `status` is the
+ * host API's HTTP status, absent when the host predates it or never got one.
+ */
+export class TransportRequestError extends Error {
+    readonly hostSerial: string;
+    readonly path: string;
+    readonly status?: number;
+    /** The `data` the host sent, untouched. */
+    readonly body: unknown;
+
+    constructor(hostSerial: string, path: string, body: unknown, status?: number) {
+        super(describeErrorMessage(isErrorBody(body) ? body.message : body));
+        this.name = 'TransportRequestError';
+        this.hostSerial = hostSerial;
+        this.path = path;
+        this.status = status;
+        this.body = body;
+    }
 }

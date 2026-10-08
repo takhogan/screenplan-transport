@@ -228,8 +228,11 @@ export class FakeHost {
         );
     }
 
-    /** A `communication` reply, over the websocket or a given data channel. */
-    respond(requestId, data, channel) {
+    /**
+     * A `communication` reply, over the websocket or a given data channel.
+     * `extra` lands beside `data` — the `error` / `status` failure fields.
+     */
+    respond(requestId, data, channel, extra = {}) {
         const frame = encodeMessage(
             {
                 requestId,
@@ -239,7 +242,7 @@ export class FakeHost {
             {
                 clientDeviceId: this.clientDeviceId,
                 hostSerial: this.hostSerial,
-                communication: { requestId, data }
+                communication: { requestId, data, ...extra }
             }
         );
         if (channel) {
