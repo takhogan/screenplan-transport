@@ -354,3 +354,78 @@ test('a host that missed one handshake is retried rather than left stuck', async
     assert.equal(handshakes.length, 2, 'the handshake was re-sent, not skipped');
     transport.close();
 });
+
+// A proxy in front of the relay (nginx: 60 s by default) closes a websocket
+// that carries nothing, and each close re-runs the relay handshake with every
+// host not on WebRTC; a request sent meanwhile fails (2026-10-25). The
+// keepalive is the host healthcheck's frame, which the relay echoes back.
+const NULL_CLIENT = '0'.repeat(36);
+const keepalives = (socket) => socket.decodedSent().filter((f) => f.clientDeviceId === NULL_CLIENT);
+
+test('an open relay websocket gets a keepalive every interval, which the relay echoes back to no effect', async () => {
+    const { transport, socket, host, calls } = harness({ keepaliveIntervalMs: 20 });
+    await transport.start();
+    await until(() => keepalives(socket).length >= 2, 'two keepalives');
+
+    for (const frame of keepalives(socket)) {
+        assert.equal(frame.hostSerial, ' '.repeat(20));
+        assert.equal(frame.requestId.length, 36);
+        assert.notEqual(frame.requestId, ' '.repeat(36));
+        assert.deepEqual(frame.envelope, { wsHealthCheck: true });
+    }
+    // What the relay does with a NULL_CLIENT_DEVICE_ID frame: send it back.
+    for (const raw of socket.sent.filter((raw) => raw.slice(36, 72) === NULL_CLIENT)) {
+        socket.receive(raw);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(calls.error, []);
+    assert.deepEqual(calls.warn, []);
+
+    // Requests are unaffected.
+    const pending = transport.doRequest(HOST_SERIAL, jsonRequest(), true);
+    const frame = await requestFrame(socket, '/api/list-scripts');
+    host.respond(frame.requestId, { ok: true });
+    assert.deepEqual(await pending, { ok: true });
+    transport.close();
+});
+
+test('the keepalive stops with its websocket, starts again on the reconnected one, and stops on close()', async () => {
+    resetIds();
+    const sockets = [];
+    const transport = new ClientTransport({
+        clientDeviceId: CLIENT_ID,
+        keepaliveIntervalMs: 20,
+        platform: {
+            openWebSocket: () => {
+                const socket = new FakeWebSocket();
+                sockets.push(socket);
+                return socket;
+            },
+            createPeerConnection: () => new FakePeerConnection(),
+            generateId: fakeId,
+            logger: silentLogger().logger
+        }
+    });
+    await transport.start();
+    await until(() => keepalives(sockets[0]).length >= 1, 'a keepalive on the first websocket');
+
+    sockets[0].close();
+    const sentOnFirst = keepalives(sockets[0]).length;
+    // The transport reconnects 5 s after a close.
+    await until(() => sockets.length === 2, 'the reconnect', 7000);
+    await until(() => keepalives(sockets[1]).length >= 2, 'keepalives on the second websocket');
+    assert.equal(keepalives(sockets[0]).length, sentOnFirst, 'nothing more on the closed websocket');
+
+    transport.close();
+    const sentOnSecond = keepalives(sockets[1]).length;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(keepalives(sockets[1]).length, sentOnSecond, 'nothing after close()');
+});
+
+test('keepaliveIntervalMs 0 sends no keepalive', async () => {
+    const { transport, socket } = harness({ keepaliveIntervalMs: 0 });
+    await transport.start();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(keepalives(socket), []);
+    transport.close();
+});

@@ -72,6 +72,13 @@ filed as a host is never a routing destination for a reply.
 `openWebSocket` is called again on every reconnect, so an adapter that mints the
 token inside it never sends an expired one.
 
+While the relay websocket is open, the transport sends a keepalive every
+`keepaliveIntervalMs` (30 s by default; 0 turns it off): the host
+healthcheck's frame, addressed to the all-zero client id, which the relay
+echoes straight back. Without it a proxy in front of the relay closes the idle
+websocket (nginx after 60 s), and the reconnect re-runs the relay handshake
+with every host not on WebRTC, failing any request sent in between.
+
 ## Scripts
 
 - `npm run build` — compile TypeScript to `dist/`.

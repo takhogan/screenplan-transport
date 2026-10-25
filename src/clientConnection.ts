@@ -1,8 +1,10 @@
 import {
+    BLANK_HOST_SERIAL,
     BLANK_REQUEST_ID,
     decodeMessage,
     encodeMessage,
     isSetupMessage,
+    NULL_CLIENT_DEVICE_ID,
     padHostSerial
 } from './routing';
 import {
@@ -72,6 +74,17 @@ export interface ClientTransportOptions {
      * connection is 5 minutes; this is our side of that deadline.
      */
     webRTCNegotiationTimeoutMs?: number;
+    /**
+     * How often to send the relay a keepalive while its websocket is open: the
+     * frame the host's websocket healthcheck sends, addressed to
+     * NULL_CLIENT_DEVICE_ID, which the relay echoes back. A proxy in front of
+     * the relay closes a websocket that carries nothing for a while (nginx
+     * after 60 s by default), and every close re-runs the relay handshake with
+     * each host not reached over WebRTC, so a request sent meanwhile fails
+     * (seen 2026-10-25: an editor's websocket closed every 60 s). 30000 by
+     * default; 0 sends none.
+     */
+    keepaliveIntervalMs?: number;
 }
 
 interface PendingRequest {
@@ -109,6 +122,8 @@ interface HostConnection {
 
 const DEFAULT_ICE_SERVERS: unknown[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 
+const DEFAULT_KEEPALIVE_INTERVAL_MS = 30000;
+
 /**
  * The client half of the ScreenPlan relay protocol.
  *
@@ -131,11 +146,13 @@ export class ClientTransport {
     private readonly requestTimeoutMs: number;
     private readonly connectTimeoutMs: number;
     private readonly webRTCNegotiationTimeoutMs: number;
+    private readonly keepaliveIntervalMs: number;
 
     private ws: WebSocketLike | null = null;
     private deviceWebsocketState: ChannelState = 'pending';
     private reconnecting = false;
     private closed = false;
+    private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
     private readonly hostConnections = new Map<string, HostConnection>();
     /** requestId -> in-flight request. Flat, because requestIds are globally unique. */
@@ -150,6 +167,7 @@ export class ClientTransport {
         this.requestTimeoutMs = options.requestTimeoutMs ?? 0;
         this.connectTimeoutMs = options.connectTimeoutMs ?? 0;
         this.webRTCNegotiationTimeoutMs = options.webRTCNegotiationTimeoutMs ?? 300000;
+        this.keepaliveIntervalMs = options.keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
     }
 
     on<K extends keyof ClientTransportEvents>(
@@ -464,6 +482,9 @@ export class ClientTransport {
         };
 
         ws.onclose = () => {
+            if (this.ws === ws) {
+                this.stopKeepalive();
+            }
             if (this.closed) {
                 return;
             }
@@ -501,6 +522,46 @@ export class ClientTransport {
         this.logger.info('ClientTransport: relay websocket open');
         this.deviceWebsocketState = 'completed';
         this.reconnecting = false;
+        if (this.ws) {
+            this.startKeepalive(this.ws);
+        }
+    }
+
+    /**
+     * Sends `ws` a keepalive every keepaliveIntervalMs, so no proxy in front of
+     * the relay sees it idle. The relay's echo answers no request of ours, and
+     * handleResponse drops it.
+     */
+    private startKeepalive(ws: WebSocketLike): void {
+        this.stopKeepalive();
+        if (this.keepaliveIntervalMs <= 0) {
+            return;
+        }
+        const timer = setInterval(() => {
+            if (this.ws !== ws || ws.readyState !== WEBSOCKET_OPEN) {
+                clearInterval(timer);
+                return;
+            }
+            try {
+                ws.send(encodeMessage({
+                    requestId: this.platform.generateId(),
+                    clientDeviceId: NULL_CLIENT_DEVICE_ID,
+                    hostSerial: BLANK_HOST_SERIAL
+                }, { wsHealthCheck: true }));
+            } catch (error) {
+                this.logger.warn('ClientTransport: could not send the relay keepalive', error);
+            }
+        }, this.keepaliveIntervalMs);
+        // Never what keeps a Node process (a controller's CLI) running.
+        (timer as { unref?: () => void }).unref?.();
+        this.keepaliveTimer = timer;
+    }
+
+    private stopKeepalive(): void {
+        if (this.keepaliveTimer) {
+            clearInterval(this.keepaliveTimer);
+            this.keepaliveTimer = null;
+        }
     }
 
     private scheduleReconnect(): void {
@@ -916,6 +977,7 @@ export class ClientTransport {
      */
     close(): void {
         this.closed = true;
+        this.stopKeepalive();
         for (const [requestId, pending] of Array.from(this.pendingRequests)) {
             this.settle(requestId, pending, () =>
                 pending.reject(new Error('ClientTransport: closed before the response arrived'))
