@@ -26,6 +26,7 @@ import {
 } from './platform';
 import { Emitter } from './emitter';
 import { decodeFrame } from './frames';
+import { selectedCandidatePair, SelectedCandidatePair } from './stats';
 
 /** Lifecycle of one leg (relay websocket or peer connection) to one host. */
 export type ChannelState = 'pending' | 'initializing' | 'completed';
@@ -44,8 +45,41 @@ export interface StatusEvent {
     status: string;
 }
 
+/**
+ * One finished request, as the client saw it: how long the host took to send
+ * its first frame, and how long until the last. Emitted for every request,
+ * failed ones included, so a caller can log or aggregate transfer speed
+ * without wrapping doRequest.
+ */
+export interface RequestTimingEvent {
+    hostSerial: string;
+    requestId: string;
+    method: string;
+    path: string;
+    requestType: string;
+    /** The channel the request went out on. Replies come back the same way. */
+    transport: TransportKind;
+    ok: boolean;
+    /** Request sent to settled, in ms. */
+    totalMs: number;
+    /** Request sent to the first reply frame, in ms; null if none arrived. */
+    firstFrameMs: number | null;
+    frames: number;
+    /** Characters of reply frames received, routing prefix excluded: base64 and JSON included, as on the wire. */
+    bytes: number;
+}
+
+export interface ConnectionStats {
+    hostSerial: string;
+    websocket: ChannelState;
+    webRTC: ChannelState;
+    /** The path WebRTC uses, when a peer connection is up and the platform exposes getStats. */
+    selectedCandidatePair: SelectedCandidatePair | null;
+}
+
 export interface ClientTransportEvents extends Record<string, unknown> {
     status: StatusEvent;
+    requestTiming: RequestTimingEvent;
 }
 
 export interface ClientTransportOptions {
@@ -97,6 +131,11 @@ interface PendingRequest {
     chunksReceived: number;
     totalChunks?: number;
     timeout?: ReturnType<typeof setTimeout>;
+    transport: TransportKind;
+    sentAt: number;
+    firstFrameAt: number | null;
+    frames: number;
+    bytes: number;
 }
 
 interface HostConnection {
@@ -183,6 +222,30 @@ export class ClientTransport {
         await this.openDeviceWebsocket();
     }
 
+    /**
+     * The host's channel states plus the candidate pair its peer connection
+     * selected, so a caller can tell a LAN path from ZeroTier or the internet.
+     * Never throws: a stack without getStats, or a failing call, gives null.
+     */
+    async getConnectionStats(hostSerial: string): Promise<ConnectionStats> {
+        const connection = this.hostConnections.get(padHostSerial(hostSerial));
+        let pair: SelectedCandidatePair | null = null;
+        const pc = connection?.pc;
+        if (pc && typeof pc.getStats === 'function') {
+            try {
+                pair = selectedCandidatePair(await pc.getStats());
+            } catch (error) {
+                this.logger.debug(`ClientTransport: getStats for ${hostSerial} failed`, error);
+            }
+        }
+        return {
+            hostSerial,
+            websocket: connection?.websocketState ?? 'pending',
+            webRTC: connection?.webRTCState ?? 'pending',
+            selectedCandidatePair: pair
+        };
+    }
+
     getHostState(hostSerial: string): { websocket: ChannelState; webRTC: ChannelState } {
         const connection = this.hostConnections.get(padHostSerial(hostSerial));
         return {
@@ -222,7 +285,31 @@ export class ClientTransport {
             throw new Error(`ClientTransport: no channel available for host ${hostSerial}`);
         }
 
-        return new Promise<unknown>((resolve, reject) => {
+        return new Promise<unknown>((resolveRequest, rejectRequest) => {
+            const finish = (ok: boolean) => {
+                const now = Date.now();
+                this.emitter.emit('requestTiming', {
+                    hostSerial: connection.hostSerial,
+                    requestId,
+                    method: request.method,
+                    path: request.path,
+                    requestType: request.requestType,
+                    transport: channel.kind,
+                    ok,
+                    totalMs: now - pending.sentAt,
+                    firstFrameMs: pending.firstFrameAt === null ? null : pending.firstFrameAt - pending.sentAt,
+                    frames: pending.frames,
+                    bytes: pending.bytes
+                });
+            };
+            const resolve = (value: unknown) => {
+                finish(true);
+                resolveRequest(value);
+            };
+            const reject = (reason: unknown) => {
+                finish(false);
+                rejectRequest(reason);
+            };
             const pending: PendingRequest = {
                 request,
                 hostSerial: connection.hostSerial,
@@ -230,7 +317,12 @@ export class ClientTransport {
                 reject,
                 settled: false,
                 chunks: [],
-                chunksReceived: 0
+                chunksReceived: 0,
+                transport: channel.kind,
+                sentAt: Date.now(),
+                firstFrameAt: null,
+                frames: 0,
+                bytes: 0
             };
             if (this.requestTimeoutMs > 0) {
                 pending.timeout = setTimeout(() => {
@@ -680,6 +772,9 @@ export class ClientTransport {
             // arrived after a timeout. Both are expected; neither is an error.
             return;
         }
+        pending.firstFrameAt ??= Date.now();
+        pending.frames += 1;
+        pending.bytes += body.length;
         let response: TransportResponse;
         try {
             response = (JSON.parse(body) as TransportEnvelope).communication as TransportResponse;

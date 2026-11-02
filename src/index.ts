@@ -4,3 +4,4 @@ export * from './platform';
 export * from './frames';
 export * from './emitter';
 export * from './clientConnection';
+export * from './stats';

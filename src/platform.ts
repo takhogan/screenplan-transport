@@ -54,6 +54,8 @@ export interface RTCPeerConnectionLike {
     setRemoteDescription(description: unknown): Promise<void>;
     addIceCandidate(candidate: unknown): Promise<void>;
     close(): void;
+    /** An `RTCStatsReport`. Optional: only read to describe the path in use. */
+    getStats?(): Promise<unknown>;
     onicecandidate: ((event: any) => void) | null;
     ondatachannel: ((event: any) => void) | null;
     oniceconnectionstatechange: ((event: any) => void) | null;

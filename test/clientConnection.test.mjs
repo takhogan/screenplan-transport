@@ -429,3 +429,70 @@ test('keepaliveIntervalMs 0 sends no keepalive', async () => {
     assert.deepEqual(keepalives(socket), []);
     transport.close();
 });
+
+test('every request reports its timing: transport, frames and reply size, failures included', async () => {
+    const { transport, host, socket } = harness();
+    const timings = [];
+    transport.on('requestTiming', (timing) => timings.push(timing));
+    await transport.start();
+
+    const streamed = transport.doRequest(
+        HOST_SERIAL,
+        { requestId: null, method: 'GET', requestType: 'chunkstream', path: '/api/serve/a.png', payload: {} },
+        true
+    );
+    const frame = await requestFrame(socket, '/api/serve/a.png');
+    host.respond(frame.requestId, { type: 'chunk', chunk: 'AAAA' });
+    host.respond(frame.requestId, { type: 'chunk', chunk: 'BBBB' });
+    host.respond(frame.requestId, { type: 'eof' });
+    await streamed;
+
+    const failing = transport.doRequest(HOST_SERIAL, jsonRequest('/api/missing'), true);
+    const failingFrame = await requestFrame(socket, '/api/missing');
+    host.respond(failingFrame.requestId, { message: 'not found' }, undefined, { error: true, status: 404 });
+    await assert.rejects(failing);
+
+    assert.equal(timings.length, 2);
+    const [ok, failed] = timings;
+    assert.equal(ok.path, '/api/serve/a.png');
+    assert.equal(ok.requestType, 'chunkstream');
+    assert.equal(ok.transport, 'websocket');
+    assert.equal(ok.ok, true);
+    assert.equal(ok.frames, 3);
+    assert.ok(ok.bytes > 'AAAABBBB'.length, 'bytes count the frames as sent, JSON included');
+    assert.ok(ok.firstFrameMs !== null && ok.firstFrameMs <= ok.totalMs);
+    assert.equal(failed.path, '/api/missing');
+    assert.equal(failed.ok, false);
+    assert.equal(failed.frames, 1);
+    transport.close();
+});
+
+test('getConnectionStats reports the selected candidate pair once WebRTC is up', async () => {
+    const { transport, host, socket, peerConnections } = harness();
+    await transport.start();
+    assert.equal((await transport.getConnectionStats(HOST_SERIAL)).selectedCandidatePair, null, 'no host yet');
+
+    const first = transport.doRequest(HOST_SERIAL, jsonRequest('/api/get-ping'), true);
+    const firstFrame = await requestFrame(socket, '/api/get-ping');
+    host.respond(firstFrame.requestId, { ping: 1 });
+    await first;
+    await until(() => peerConnections.length === 1 && !!peerConnections[0].remoteDescription, 'the answer');
+    const pc = peerConnections[0];
+    pc.completeNegotiation();
+    pc.getStats = async () => new Map([
+        ['T01', { id: 'T01', type: 'transport', selectedCandidatePairId: 'CP1' }],
+        ['CP1', { id: 'CP1', type: 'candidate-pair', state: 'succeeded', nominated: true, localCandidateId: 'L1', remoteCandidateId: 'R1', currentRoundTripTime: 0.0423, bytesSent: 10, bytesReceived: 20 }],
+        ['L1', { id: 'L1', type: 'local-candidate', candidateType: 'host', protocol: 'udp', address: '10.147.17.32', port: 5000 }],
+        ['R1', { id: 'R1', type: 'remote-candidate', candidateType: 'srflx', protocol: 'udp', address: '73.1.2.3', port: 6000 }]
+    ]);
+
+    const stats = await transport.getConnectionStats(HOST_SERIAL);
+    assert.equal(stats.webRTC, 'completed');
+    assert.deepEqual(stats.selectedCandidatePair.local, { candidateType: 'host', protocol: 'udp', address: '10.147.17.32', port: 5000, networkType: null });
+    assert.equal(stats.selectedCandidatePair.remote.candidateType, 'srflx');
+    assert.equal(stats.selectedCandidatePair.currentRoundTripTimeMs, 42.3);
+
+    pc.getStats = async () => { throw new Error('closed'); };
+    assert.equal((await transport.getConnectionStats(HOST_SERIAL)).selectedCandidatePair, null, 'a failing getStats is not an error');
+    transport.close();
+});
